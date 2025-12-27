@@ -20,7 +20,8 @@
     <div id="status-box">Waiting for input...</div>
     
     <div id="canvas-container"></div>
-    <div class="note-text" id="note-name">Play a key</div>
+    <div class="note-text" id="target-name">Target: (loading)</div>
+    <div class="note-text" id="note-name">You: (rest)</div>
 
     <script>
         // --- 1. VexFlow Setup ---
@@ -31,7 +32,7 @@
             vf = new Factory({ renderer: { elementId: 'canvas-container', width: 500, height: 250 } });
             
             // Draw empty staff with a whole rest placeholder
-            drawStaff([], true); 
+            drawStaff({ targetNoteNames: [], playedNoteNames: [], playedColor: '#888' });
         } catch (e) {
             document.getElementById("status-box").innerText = "Error: VexFlow failed to load from CDN.";
             document.getElementById("status-box").style.background = "#f8d7da";
@@ -46,36 +47,53 @@
             return `${letter.toLowerCase()}${sharp ? '#': ''}/${octave}`;
         }
 
-        function drawStaff(noteKeys = [], isRest = false) {
+        function drawStaff({ targetNoteNames = [], playedNoteNames = [], playedColor = '#c0392b' }) {
             if (!vf) return;
 
             // Reset context to avoid accumulating draw state
             vf.context.clear();
 
-            const normalized = Array.isArray(noteKeys) ? noteKeys : [noteKeys];
-            const vexKeys = isRest ? ["b/4"] : normalized.map(toVexKey);
-            const duration = isRest ? 'wr' : 'w';
+            const targetList = Array.isArray(targetNoteNames) ? targetNoteNames : [targetNoteNames];
+            const playedList = Array.isArray(playedNoteNames) ? playedNoteNames : [playedNoteNames];
+
+            const targetKeys = targetList.length ? targetList.map(toVexKey) : ["b/4"];
+            const playedKeys = playedList.length ? playedList.map(toVexKey) : ["b/4"];
+
+            const targetDuration = targetList.length ? 'w' : 'wr';
+            const playedDuration = playedList.length ? 'w' : 'wr';
 
             const stave = new Vex.Flow.Stave(10, 40, 480);
             stave.addClef('treble').addTimeSignature('4/4');
 
-            const staveNote = new Vex.Flow.StaveNote({ keys: vexKeys, duration, clef: 'treble', stem_direction: 1 });
-            if (!isRest) {
-                vexKeys.forEach((k, idx) => {
+            const targetNote = new Vex.Flow.StaveNote({ keys: targetKeys, duration: targetDuration, clef: 'treble', stem_direction: 1 });
+            targetKeys.forEach((k, idx) => {
+                if (k.includes('#')) {
+                    targetNote.addAccidental(idx, new Vex.Flow.Accidental('#'));
+                }
+            });
+
+            const playedNote = new Vex.Flow.StaveNote({ keys: playedKeys, duration: playedDuration, clef: 'treble', stem_direction: 1 });
+            if (playedList.length) {
+                playedNote.setStyle({ fillStyle: playedColor, strokeStyle: playedColor });
+                playedKeys.forEach((k, idx) => {
                     if (k.includes('#')) {
-                        staveNote.addAccidental(idx, new Vex.Flow.Accidental('#'));
+                        playedNote.addAccidental(idx, new Vex.Flow.Accidental('#'));
                     }
                 });
             }
 
             const voice = new Vex.Flow.Voice({ num_beats: 4, beat_value: 4 });
+            const userVoice = new Vex.Flow.Voice({ num_beats: 4, beat_value: 4 });
             voice.setStrict(false);
-            voice.addTickable(staveNote);
+            userVoice.setStrict(false);
+            voice.addTickable(targetNote);
+            userVoice.addTickable(playedNote);
 
-            new Vex.Flow.Formatter().joinVoices([voice]).format([voice], 400);
+            new Vex.Flow.Formatter().joinVoices([voice, userVoice]).format([voice, userVoice], 420);
 
             stave.setContext(vf.context).draw();
             voice.draw(vf.context, stave);
+            userVoice.draw(vf.context, stave);
         }
 
         function midiToNoteName(midiNote) {
@@ -85,21 +103,96 @@
             return `${noteName}${octave}`;
         }
 
-        const activeNotes = new Set();
+        // --- 3. App State ---
+        const state = {
+            activeNotes: new Set(),
+            targetNotes: [],
+            advanceTimer: null
+        };
 
-        function renderActiveNotes() {
-            if (activeNotes.size === 0) {
-                document.getElementById("note-name").innerText = "(rest)";
-                drawStaff([], true);
-                return;
-            }
-
-            const noteNames = Array.from(activeNotes).sort((a, b) => a - b).map(midiToNoteName);
-            document.getElementById("note-name").innerText = noteNames.join(" · ");
-            drawStaff(noteNames, false);
+        function setTarget(notes) {
+            state.targetNotes = notes;
+            const targetNames = notes.map(midiToNoteName);
+            document.getElementById("target-name").innerText = `Target: ${targetNames.join(" · ")}`;
+            render();
         }
 
-        // --- 2. MIDI Setup ---
+        function setsEqual(aArr, bArr) {
+            if (aArr.length !== bArr.length) return false;
+            for (let i = 0; i < aArr.length; i++) {
+                if (aArr[i] !== bArr[i]) return false;
+            }
+            return true;
+        }
+
+        function render() {
+            const playedSorted = Array.from(state.activeNotes).sort((a, b) => a - b);
+            const targetSorted = [...state.targetNotes].sort((a, b) => a - b);
+
+            const playedNames = playedSorted.map(midiToNoteName);
+            const targetNames = targetSorted.map(midiToNoteName);
+
+            const isCorrect = playedSorted.length > 0 && setsEqual(playedSorted, targetSorted);
+            const playedColor = playedSorted.length === 0 ? '#888' : (isCorrect ? '#2d8f4a' : '#c0392b');
+
+            document.getElementById("note-name").innerText = playedNames.length ? `You: ${playedNames.join(" · ")}` : "You: (rest)";
+
+            drawStaff({
+                targetNoteNames: targetNames,
+                playedNoteNames: playedNames,
+                playedColor
+            });
+
+            scheduleAdvance(isCorrect && playedSorted.length > 0);
+        }
+
+        // --- 4. Target generation ---
+        function randomInt(min, max) {
+            return Math.floor(Math.random() * (max - min + 1)) + min;
+        }
+
+        function makeSingleNote() {
+            // Comfortable range C3 (48) to C5 (72)
+            return [randomInt(48, 72)];
+        }
+
+        function makeMajorTriad() {
+            const roots = [];
+            for (let n = 48; n <= 64; n++) {
+                if (n + 7 <= 72) roots.push(n);
+            }
+            const root = roots[randomInt(0, roots.length - 1)];
+            return [root, root + 4, root + 7];
+        }
+
+        function pickNextTarget() {
+            const isChord = Math.random() < 0.4;
+            const target = isChord ? makeMajorTriad() : makeSingleNote();
+            state.activeNotes.clear();
+            clearAdvance();
+            setTarget(target);
+        }
+
+        function clearAdvance() {
+            if (state.advanceTimer) {
+                clearTimeout(state.advanceTimer);
+                state.advanceTimer = null;
+            }
+        }
+
+        function scheduleAdvance(shouldAdvance) {
+            if (!shouldAdvance) {
+                clearAdvance();
+                return;
+            }
+            if (state.advanceTimer) return;
+            state.advanceTimer = setTimeout(() => {
+                state.advanceTimer = null;
+                pickNextTarget();
+            }, 650);
+        }
+
+        // --- 5. MIDI Setup ---
         if (navigator.requestMIDIAccess) {
             navigator.requestMIDIAccess().then(onSuccess, onFailure);
         } else {
@@ -111,12 +204,13 @@
             if (inputs.size === 0) {
                 document.getElementById("status-box").innerText = "No MIDI devices found.";
             } else {
-                // Connect to all inputs
                 inputs.forEach(input => {
                     document.getElementById("status-box").innerText = `Connected to: ${input.name}`;
                     input.onmidimessage = handleMIDI;
                 });
             }
+            // Start with an initial target once MIDI is ready
+            pickNextTarget();
         }
 
         function onFailure() {
@@ -139,16 +233,16 @@
 
             // Note On (144-159) with Velocity > 0
             if (command >= 144 && command <= 159 && velocity > 0) {
-                activeNotes.add(note);
-                renderActiveNotes();
+                state.activeNotes.add(note);
+                render();
                 return;
             }
 
             // Note Off (128-143) or Note On with velocity 0
             const isNoteOff = (command >= 128 && command <= 143) || (command >= 144 && command <= 159 && velocity === 0);
             if (isNoteOff) {
-                activeNotes.delete(note);
-                renderActiveNotes();
+                state.activeNotes.delete(note);
+                render();
             }
         }
     </script>
