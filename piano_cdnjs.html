@@ -55,7 +55,21 @@
         </label>
         <button id="btn-start" style="margin-left: 10px;">Start</button>
         <button id="btn-next" style="margin-left: 6px;">Next</button>
+        <span style="margin-left: 14px;">
+            BPM
+            <input id="bpm-slider" type="range" min="60" max="140" value="100" style="vertical-align: middle;">
+            <span id="bpm-value">100</span>
+        </span>
+        <button id="btn-metro" style="margin-left: 8px;">Metronome: Off</button>
     </div>
+    <div id="beat-bar" style="margin-top:8px; display:inline-flex; gap:6px;">
+        <span class="beat-dot" style="width:12px;height:12px;border-radius:50%;background:#ddd;display:inline-block;"></span>
+        <span class="beat-dot" style="width:12px;height:12px;border-radius:50%;background:#ddd;display:inline-block;"></span>
+        <span class="beat-dot" style="width:12px;height:12px;border-radius:50%;background:#ddd;display:inline-block;"></span>
+        <span class="beat-dot" style="width:12px;height:12px;border-radius:50%;background:#ddd;display:inline-block;"></span>
+    </div>
+    <div id="beat-hint" style="margin-top:4px;color:#666;font-size:14px;">Play on the blue dot (downbeat accented).</div>
+    <div id="timing-msg" style="margin-top:4px;color:#888;font-size:14px;min-height:18px;"></div>
     <div class="note-text" id="target-name">Target: (loading)</div>
     <div class="note-text" id="note-name">You: (rest)</div>
 
@@ -73,7 +87,12 @@
             colors: {
                 played: { rest: '#888', ok: '#2d8f4a', err: '#c0392b' }
             },
-            advanceDelayMs: 650
+            advanceDelayMs: 650,
+            timing: {
+                bpm: 100,
+                beatCount: 4,
+                onTimeThresholdMs: 100
+            }
         };
 
         // --- Progressions (C major default) ---
@@ -187,6 +206,7 @@
             return note;
         }
 
+
         function buildStaves() {
             const treble = new Vex.Flow.Stave(10, CONFIG.layout.trebleY, CONFIG.layout.staveWidth);
             const bass = new Vex.Flow.Stave(10, CONFIG.layout.bassY, CONFIG.layout.staveWidth);
@@ -222,9 +242,9 @@
             const bassPlayedKeys = playedSplit.bass.length ? playedSplit.bass.map(toVexKey) : ['d/3'];
 
             const trebleTargetNote = buildNote(trebleTargetKeys, targetSplit.treble.length ? 'w' : 'wr', 'treble');
-            const treblePlayedNote = buildNote(treblePlayedKeys, playedSplit.treble.length ? 'w' : 'wr', 'treble', playedSplit.treble.length ? playedColor : null);
             const bassTargetNote = buildNote(bassTargetKeys, targetSplit.bass.length ? 'w' : 'wr', 'bass');
-            const bassPlayedNote = buildNote(bassPlayedKeys, playedSplit.bass.length ? 'w' : 'wr', 'bass', playedSplit.bass.length ? playedColor : null);
+            const treblePlayedNote = playedSplit.treble.length ? buildNote(treblePlayedKeys, 'w', 'treble', playedColor) : null;
+            const bassPlayedNote = playedSplit.bass.length ? buildNote(bassPlayedKeys, 'w', 'bass', playedColor) : null;
 
             const trebleVoice = new Vex.Flow.Voice({ num_beats: 4, beat_value: 4 });
             const trebleUserVoice = new Vex.Flow.Voice({ num_beats: 4, beat_value: 4 });
@@ -233,21 +253,23 @@
             [trebleVoice, trebleUserVoice, bassVoice, bassUserVoice].forEach(v => v.setStrict(false));
 
             trebleVoice.addTickable(trebleTargetNote);
-            trebleUserVoice.addTickable(treblePlayedNote);
             bassVoice.addTickable(bassTargetNote);
-            bassUserVoice.addTickable(bassPlayedNote);
+            if (treblePlayedNote) trebleUserVoice.addTickable(treblePlayedNote);
+            if (bassPlayedNote) bassUserVoice.addTickable(bassPlayedNote);
 
-            new Vex.Flow.Formatter().joinVoices([trebleVoice, trebleUserVoice]).format([trebleVoice, trebleUserVoice], CONFIG.layout.formatterWidth);
-            new Vex.Flow.Formatter().joinVoices([bassVoice, bassUserVoice]).format([bassVoice, bassUserVoice], CONFIG.layout.formatterWidth);
+            const trebleVoices = treblePlayedNote ? [trebleVoice, trebleUserVoice] : [trebleVoice];
+            const bassVoices = bassPlayedNote ? [bassVoice, bassUserVoice] : [bassVoice];
+            new Vex.Flow.Formatter().joinVoices(trebleVoices).format(trebleVoices, CONFIG.layout.formatterWidth);
+            new Vex.Flow.Formatter().joinVoices(bassVoices).format(bassVoices, CONFIG.layout.formatterWidth);
 
             staves.treble.setContext(vf.context).draw();
             staves.bass.setContext(vf.context).draw();
             staves.connector.setContext(vf.context).draw();
 
             trebleVoice.draw(vf.context, staves.treble);
-            trebleUserVoice.draw(vf.context, staves.treble);
+            if (treblePlayedNote) trebleUserVoice.draw(vf.context, staves.treble);
             bassVoice.draw(vf.context, staves.bass);
-            bassUserVoice.draw(vf.context, staves.bass);
+            if (bassPlayedNote) bassUserVoice.draw(vf.context, staves.bass);
 
             // Draw a subtle middle-C guide line between staves
             const midY = (staves.treble.getYForLine(5) + staves.bass.getYForLine(-1)) / 2;
@@ -295,7 +317,16 @@
             const targetNames = targetSorted.map(midiToNoteName);
 
             const isCorrect = playedSorted.length > 0 && setsEqual(playedSorted, targetSorted);
-            const playedColor = playedSorted.length === 0 ? CONFIG.colors.played.rest : (isCorrect ? CONFIG.colors.played.ok : CONFIG.colors.played.err);
+            const timing = classifyDownbeatTiming();
+            const timingOk = timing.status === 'on';
+            let playedColor;
+            if (playedSorted.length === 0) {
+                playedColor = CONFIG.colors.played.rest;
+            } else if (!metroRunning) {
+                playedColor = isCorrect ? CONFIG.colors.played.ok : CONFIG.colors.played.err;
+            } else {
+                playedColor = (isCorrect && timingOk) ? CONFIG.colors.played.ok : CONFIG.colors.played.err;
+            }
 
             document.getElementById("note-name").innerText = playedNames.length ? `You: ${playedNames.join(" · ")}` : "You: (rest)";
 
@@ -305,7 +336,139 @@
                 playedColor
             });
 
-            scheduleAdvance(isCorrect && playedSorted.length > 0);
+            const shouldAdvance = isCorrect && playedSorted.length > 0 && (!metroRunning || timingOk);
+            scheduleAdvance(shouldAdvance);
+
+            const msgEl = document.getElementById('timing-msg');
+            if (msgEl) {
+                if (!metroRunning || playedSorted.length === 0) {
+                    msgEl.innerText = '';
+                } else if (isCorrect) {
+                    if (timing.status === 'on') {
+                        msgEl.style.color = CONFIG.colors.played.ok;
+                        msgEl.innerText = 'On beat ✓';
+                    } else {
+                        msgEl.style.color = CONFIG.colors.played.err;
+                        const dir = timing.deltaMs > 0 ? 'late' : 'early';
+                        msgEl.innerText = `${Math.abs(Math.round(timing.deltaMs))} ms ${dir}`;
+                    }
+                } else {
+                    msgEl.style.color = CONFIG.colors.played.err;
+                    msgEl.innerText = 'Pitch mismatch';
+                }
+            }
+        }
+
+        // --- 5a. Metronome + Scheduler ---
+        let audioCtx = null;
+        let metroRunning = false;
+        let beatIntervalSec = 60 / CONFIG.timing.bpm;
+        let nextBeatTime = 0;
+        let metroTimer = null;
+        let beatIndex = 0;
+        let metroStartTime = 0;
+
+        function ensureAudio() {
+            if (!audioCtx) {
+                try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch {}
+            }
+            return !!audioCtx;
+        }
+
+        function scheduleClick(time, accented=false) {
+            if (!audioCtx) return;
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.frequency.value = accented ? 1000 : 800;
+            gain.gain.setValueAtTime(accented ? 0.15 : 0.08, time);
+            gain.gain.exponentialRampToValueAtTime(0.0001, time + 0.08);
+            osc.connect(gain).connect(audioCtx.destination);
+            osc.start(time);
+            osc.stop(time + 0.08);
+        }
+
+        function updateBeatBar(idx) {
+            const dots = document.querySelectorAll('#beat-bar .beat-dot');
+            dots.forEach((d, i) => d.style.background = i === idx ? '#4a90e2' : '#ddd');
+            const hint = document.getElementById('beat-hint');
+            if (hint) hint.innerText = `Beat ${idx + 1}/${CONFIG.timing.beatCount} — play on beat 1 (blue accented)`;
+        }
+
+        function schedulerTick() {
+            if (!audioCtx || !metroRunning) return;
+            const lookahead = 0.1; // seconds
+            const now = audioCtx.currentTime;
+            while (nextBeatTime < now + lookahead) {
+                scheduleClick(nextBeatTime, beatIndex === 0);
+                updateBeatBar(beatIndex);
+                // Advance beat
+                nextBeatTime += beatIntervalSec;
+                beatIndex = (beatIndex + 1) % CONFIG.timing.beatCount;
+            }
+        }
+
+        function startMetronome() {
+            if (!ensureAudio()) return;
+            if (metroRunning) return;
+            metroRunning = true;
+            beatIntervalSec = 60 / CONFIG.timing.bpm;
+            const now = audioCtx.currentTime;
+            metroStartTime = now;
+            nextBeatTime = now + 0.05; // small delay
+            beatIndex = 0;
+            updateBeatBar(beatIndex);
+            metroTimer = setInterval(schedulerTick, 25);
+            document.getElementById('btn-metro').innerText = 'Metronome: On';
+        }
+
+        function stopMetronome() {
+            metroRunning = false;
+            if (metroTimer) { clearInterval(metroTimer); metroTimer = null; }
+            updateBeatBar(-1);
+            document.getElementById('btn-metro').innerText = 'Metronome: Off';
+        }
+
+        function setBpm(bpm) {
+            CONFIG.timing.bpm = bpm;
+            beatIntervalSec = 60 / bpm;
+            if (metroRunning && audioCtx) {
+                // Re-anchor to current time to avoid drift
+                const now = audioCtx.currentTime;
+                nextBeatTime = now + 0.05;
+                beatIndex = 0;
+            }
+        }
+
+        function classifyTiming() {
+            if (!audioCtx || !metroRunning) return 'off';
+            const now = audioCtx.currentTime;
+            const interval = beatIntervalSec;
+            const n = Math.round((now - metroStartTime) / interval);
+            const nearestBeatTime = metroStartTime + n * interval;
+            const deltaMs = (now - nearestBeatTime) * 1000;
+            const th = CONFIG.timing.onTimeThresholdMs;
+            const abs = Math.abs(deltaMs);
+            if (abs <= th) return 'on';
+            if (abs <= th * 2) return 'near';
+            return 'off';
+        }
+
+        function classifyDownbeatTiming() {
+            if (!audioCtx || !metroRunning) return { status: 'off', deltaMs: 0 };
+            const now = audioCtx.currentTime;
+            const interval = beatIntervalSec;
+            const beatsSinceStart = (now - metroStartTime) / interval;
+            const group = CONFIG.timing.beatCount;
+            const k = Math.round(beatsSinceStart / group) * group; // nearest multiple of beatCount
+            const downbeatTime = metroStartTime + k * interval;
+            const deltaMs = (now - downbeatTime) * 1000;
+            const th = CONFIG.timing.onTimeThresholdMs;
+            const abs = Math.abs(deltaMs);
+            let status;
+            if (abs <= th) status = 'on';
+            else if (abs <= th * 2) status = 'near';
+            else status = 'off';
+            return { status, deltaMs };
         }
 
         // --- 4. Progression runner ---
@@ -377,6 +540,11 @@
             loadPrefs();
             const randomStart = document.getElementById('random-start').checked;
             startProgression(randomStart);
+            // Initialize BPM UI
+            const bpmSlider = document.getElementById('bpm-slider');
+            const bpmVal = document.getElementById('bpm-value');
+            bpmSlider.value = CONFIG.timing.bpm;
+            bpmVal.innerText = String(CONFIG.timing.bpm);
         }
 
         function onFailure() {
@@ -443,12 +611,26 @@
             savePrefs();
         });
 
+        // Timing controls
+        document.getElementById('bpm-slider').addEventListener('input', (e) => {
+            const bpm = parseInt(e.target.value, 10);
+            document.getElementById('bpm-value').innerText = String(bpm);
+            setBpm(bpm);
+            savePrefs();
+        });
+        document.getElementById('btn-metro').addEventListener('click', () => {
+            if (metroRunning) { stopMetronome(); } else { startMetronome(); }
+            savePrefs();
+        });
+
         function savePrefs() {
             const prefs = {
                 progression: state.progressionName,
                 level: state.level,
                 key: state.key,
-                randomStart: document.getElementById('random-start').checked
+                randomStart: document.getElementById('random-start').checked,
+                bpm: CONFIG.timing.bpm,
+                metroOn: metroRunning
             };
             try { localStorage.setItem('pianoTutorPrefs', JSON.stringify(prefs)); } catch {}
         }
@@ -474,6 +656,18 @@
             }
             const rs = document.getElementById('random-start');
             if (rs && typeof prefs.randomStart === 'boolean') rs.checked = prefs.randomStart;
+            if (typeof prefs.bpm === 'number') {
+                CONFIG.timing.bpm = prefs.bpm;
+                const slider = document.getElementById('bpm-slider');
+                const val = document.getElementById('bpm-value');
+                if (slider) slider.value = prefs.bpm;
+                if (val) val.innerText = String(prefs.bpm);
+                setBpm(prefs.bpm);
+            }
+            if (prefs.metroOn) {
+                // Start after a user gesture: we flip button label only; actual start requires click in some browsers
+                document.getElementById('btn-metro').innerText = 'Metronome: Off';
+            }
         }
     </script>
 </body>
