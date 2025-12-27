@@ -309,7 +309,8 @@
             return true;
         }
 
-        function render() {
+        // --- Pure view state derivation (no side effects) ---
+        function deriveViewState() {
             const playedSorted = Array.from(state.activeNotes).sort((a, b) => a - b);
             const targetSorted = [...state.targetNotes].sort((a, b) => a - b);
 
@@ -317,159 +318,179 @@
             const targetNames = targetSorted.map(midiToNoteName);
 
             const isCorrect = playedSorted.length > 0 && setsEqual(playedSorted, targetSorted);
-            const timing = classifyDownbeatTiming();
+            const timing = metronome.getTimingStatus();
             const timingOk = timing.status === 'on';
+
             let playedColor;
             if (playedSorted.length === 0) {
                 playedColor = CONFIG.colors.played.rest;
-            } else if (!metroRunning) {
+            } else if (!metronome.isRunning()) {
                 playedColor = isCorrect ? CONFIG.colors.played.ok : CONFIG.colors.played.err;
             } else {
                 playedColor = (isCorrect && timingOk) ? CONFIG.colors.played.ok : CONFIG.colors.played.err;
             }
 
-            document.getElementById("note-name").innerText = playedNames.length ? `You: ${playedNames.join(" · ")}` : "You: (rest)";
+            const shouldAdvance = isCorrect && playedSorted.length > 0 && (!metronome.isRunning() || timingOk);
+
+            let timingMessage = '';
+            let timingMessageColor = '#888';
+            if (metronome.isRunning() && playedSorted.length > 0) {
+                if (isCorrect) {
+                    if (timing.status === 'on') {
+                        timingMessage = 'On beat ✓';
+                        timingMessageColor = CONFIG.colors.played.ok;
+                    } else {
+                        const dir = timing.deltaMs > 0 ? 'late' : 'early';
+                        timingMessage = `${Math.abs(Math.round(timing.deltaMs))} ms ${dir}`;
+                        timingMessageColor = CONFIG.colors.played.err;
+                    }
+                } else {
+                    timingMessage = 'Pitch mismatch';
+                    timingMessageColor = CONFIG.colors.played.err;
+                }
+            }
+
+            return {
+                playedNames,
+                targetNames,
+                playedColor,
+                shouldAdvance,
+                timingMessage,
+                timingMessageColor
+            };
+        }
+
+        // --- DOM-only rendering (consumes view state) ---
+        function render() {
+            const viewState = deriveViewState();
+
+            document.getElementById("note-name").innerText = viewState.playedNames.length 
+                ? `You: ${viewState.playedNames.join(" · ")}` 
+                : "You: (rest)";
 
             drawStaff({
-                targetNoteNames: targetNames,
-                playedNoteNames: playedNames,
-                playedColor
+                targetNoteNames: viewState.targetNames,
+                playedNoteNames: viewState.playedNames,
+                playedColor: viewState.playedColor
             });
 
-            const shouldAdvance = isCorrect && playedSorted.length > 0 && (!metroRunning || timingOk);
-            scheduleAdvance(shouldAdvance);
+            scheduleAdvance(viewState.shouldAdvance);
 
             const msgEl = document.getElementById('timing-msg');
             if (msgEl) {
-                if (!metroRunning || playedSorted.length === 0) {
-                    msgEl.innerText = '';
-                } else if (isCorrect) {
-                    if (timing.status === 'on') {
-                        msgEl.style.color = CONFIG.colors.played.ok;
-                        msgEl.innerText = 'On beat ✓';
-                    } else {
-                        msgEl.style.color = CONFIG.colors.played.err;
-                        const dir = timing.deltaMs > 0 ? 'late' : 'early';
-                        msgEl.innerText = `${Math.abs(Math.round(timing.deltaMs))} ms ${dir}`;
-                    }
-                } else {
-                    msgEl.style.color = CONFIG.colors.played.err;
-                    msgEl.innerText = 'Pitch mismatch';
+                msgEl.innerText = viewState.timingMessage;
+                msgEl.style.color = viewState.timingMessageColor;
+            }
+        }
+
+        // --- 5a. Metronome Service (Event-Driven) ---
+        class Metronome {
+            constructor(config) {
+                this.config = config;
+                this.audioCtx = null;
+                this.running = false;
+                this.beatIntervalSec = 60 / config.bpm;
+                this.nextBeatTime = 0;
+                this.metroTimer = null;
+                this.beatIndex = 0;
+                this.metroStartTime = 0;
+                this.listeners = { beat: [], downbeat: [] };
+            }
+
+            on(event, callback) {
+                if (this.listeners[event]) this.listeners[event].push(callback);
+            }
+
+            emit(event, data) {
+                if (this.listeners[event]) this.listeners[event].forEach(cb => cb(data));
+            }
+
+            ensureAudio() {
+                if (!this.audioCtx) {
+                    try { this.audioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch {}
+                }
+                return !!this.audioCtx;
+            }
+
+            scheduleClick(time, accented = false) {
+                if (!this.audioCtx) return;
+                const osc = this.audioCtx.createOscillator();
+                const gain = this.audioCtx.createGain();
+                osc.frequency.value = accented ? 1000 : 800;
+                gain.gain.setValueAtTime(accented ? 0.15 : 0.08, time);
+                gain.gain.exponentialRampToValueAtTime(0.0001, time + 0.08);
+                osc.connect(gain).connect(this.audioCtx.destination);
+                osc.start(time);
+                osc.stop(time + 0.08);
+            }
+
+            tick() {
+                if (!this.audioCtx || !this.running) return;
+                const lookahead = 0.1;
+                const now = this.audioCtx.currentTime;
+                while (this.nextBeatTime < now + lookahead) {
+                    const isDownbeat = this.beatIndex === 0;
+                    this.scheduleClick(this.nextBeatTime, isDownbeat);
+                    this.emit('beat', { beatIndex: this.beatIndex, time: this.nextBeatTime, isDownbeat });
+                    // Advance beat
+                    this.nextBeatTime += this.beatIntervalSec;
+                    this.beatIndex = (this.beatIndex + 1) % this.config.beatCount;
                 }
             }
-        }
 
-        // --- 5a. Metronome + Scheduler ---
-        let audioCtx = null;
-        let metroRunning = false;
-        let beatIntervalSec = 60 / CONFIG.timing.bpm;
-        let nextBeatTime = 0;
-        let metroTimer = null;
-        let beatIndex = 0;
-        let metroStartTime = 0;
-
-        function ensureAudio() {
-            if (!audioCtx) {
-                try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch {}
+            start() {
+                if (!this.ensureAudio()) return;
+                if (this.running) return;
+                this.running = true;
+                this.beatIntervalSec = 60 / this.config.bpm;
+                const now = this.audioCtx.currentTime;
+                this.metroStartTime = now;
+                this.nextBeatTime = now + 0.05;
+                this.beatIndex = 0;
+                this.metroTimer = setInterval(() => this.tick(), 25);
             }
-            return !!audioCtx;
-        }
 
-        function scheduleClick(time, accented=false) {
-            if (!audioCtx) return;
-            const osc = audioCtx.createOscillator();
-            const gain = audioCtx.createGain();
-            osc.frequency.value = accented ? 1000 : 800;
-            gain.gain.setValueAtTime(accented ? 0.15 : 0.08, time);
-            gain.gain.exponentialRampToValueAtTime(0.0001, time + 0.08);
-            osc.connect(gain).connect(audioCtx.destination);
-            osc.start(time);
-            osc.stop(time + 0.08);
-        }
-
-        function updateBeatBar(idx) {
-            const dots = document.querySelectorAll('#beat-bar .beat-dot');
-            dots.forEach((d, i) => d.style.background = i === idx ? '#4a90e2' : '#ddd');
-            const hint = document.getElementById('beat-hint');
-            if (hint) hint.innerText = `Beat ${idx + 1}/${CONFIG.timing.beatCount} — play on beat 1 (blue accented)`;
-        }
-
-        function schedulerTick() {
-            if (!audioCtx || !metroRunning) return;
-            const lookahead = 0.1; // seconds
-            const now = audioCtx.currentTime;
-            while (nextBeatTime < now + lookahead) {
-                scheduleClick(nextBeatTime, beatIndex === 0);
-                updateBeatBar(beatIndex);
-                // Advance beat
-                nextBeatTime += beatIntervalSec;
-                beatIndex = (beatIndex + 1) % CONFIG.timing.beatCount;
+            stop() {
+                this.running = false;
+                if (this.metroTimer) { clearInterval(this.metroTimer); this.metroTimer = null; }
+                this.beatIndex = -1;
             }
-        }
 
-        function startMetronome() {
-            if (!ensureAudio()) return;
-            if (metroRunning) return;
-            metroRunning = true;
-            beatIntervalSec = 60 / CONFIG.timing.bpm;
-            const now = audioCtx.currentTime;
-            metroStartTime = now;
-            nextBeatTime = now + 0.05; // small delay
-            beatIndex = 0;
-            updateBeatBar(beatIndex);
-            metroTimer = setInterval(schedulerTick, 25);
-            document.getElementById('btn-metro').innerText = 'Metronome: On';
-        }
+            setBpm(bpm) {
+                this.config.bpm = bpm;
+                this.beatIntervalSec = 60 / bpm;
+                if (this.running && this.audioCtx) {
+                    const now = this.audioCtx.currentTime;
+                    this.nextBeatTime = now + 0.05;
+                    this.beatIndex = 0;
+                }
+            }
 
-        function stopMetronome() {
-            metroRunning = false;
-            if (metroTimer) { clearInterval(metroTimer); metroTimer = null; }
-            updateBeatBar(-1);
-            document.getElementById('btn-metro').innerText = 'Metronome: Off';
-        }
+            isRunning() {
+                return this.running;
+            }
 
-        function setBpm(bpm) {
-            CONFIG.timing.bpm = bpm;
-            beatIntervalSec = 60 / bpm;
-            if (metroRunning && audioCtx) {
-                // Re-anchor to current time to avoid drift
-                const now = audioCtx.currentTime;
-                nextBeatTime = now + 0.05;
-                beatIndex = 0;
+            getTimingStatus() {
+                if (!this.audioCtx || !this.running) return { status: 'off', deltaMs: 0 };
+                const now = this.audioCtx.currentTime;
+                const interval = this.beatIntervalSec;
+                const beatsSinceStart = (now - this.metroStartTime) / interval;
+                const group = this.config.beatCount;
+                const k = Math.round(beatsSinceStart / group) * group;
+                const downbeatTime = this.metroStartTime + k * interval;
+                const deltaMs = (now - downbeatTime) * 1000;
+                const th = this.config.onTimeThresholdMs;
+                const abs = Math.abs(deltaMs);
+                let status;
+                if (abs <= th) status = 'on';
+                else if (abs <= th * 2) status = 'near';
+                else status = 'off';
+                return { status, deltaMs };
             }
         }
 
-        function classifyTiming() {
-            if (!audioCtx || !metroRunning) return 'off';
-            const now = audioCtx.currentTime;
-            const interval = beatIntervalSec;
-            const n = Math.round((now - metroStartTime) / interval);
-            const nearestBeatTime = metroStartTime + n * interval;
-            const deltaMs = (now - nearestBeatTime) * 1000;
-            const th = CONFIG.timing.onTimeThresholdMs;
-            const abs = Math.abs(deltaMs);
-            if (abs <= th) return 'on';
-            if (abs <= th * 2) return 'near';
-            return 'off';
-        }
-
-        function classifyDownbeatTiming() {
-            if (!audioCtx || !metroRunning) return { status: 'off', deltaMs: 0 };
-            const now = audioCtx.currentTime;
-            const interval = beatIntervalSec;
-            const beatsSinceStart = (now - metroStartTime) / interval;
-            const group = CONFIG.timing.beatCount;
-            const k = Math.round(beatsSinceStart / group) * group; // nearest multiple of beatCount
-            const downbeatTime = metroStartTime + k * interval;
-            const deltaMs = (now - downbeatTime) * 1000;
-            const th = CONFIG.timing.onTimeThresholdMs;
-            const abs = Math.abs(deltaMs);
-            let status;
-            if (abs <= th) status = 'on';
-            else if (abs <= th * 2) status = 'near';
-            else status = 'off';
-            return { status, deltaMs };
-        }
+        // Create metronome instance
+        const metronome = new Metronome(CONFIG.timing);
 
         // --- 4. Progression runner ---
         function getCurrentProgression() {
@@ -540,11 +561,12 @@
             loadPrefs();
             const randomStart = document.getElementById('random-start').checked;
             startProgression(randomStart);
-            // Initialize BPM UI
+            // Initialize BPM UI and sync with metronome
             const bpmSlider = document.getElementById('bpm-slider');
             const bpmVal = document.getElementById('bpm-value');
             bpmSlider.value = CONFIG.timing.bpm;
             bpmVal.innerText = String(CONFIG.timing.bpm);
+            metronome.setBpm(CONFIG.timing.bpm);
         }
 
         function onFailure() {
@@ -581,6 +603,7 @@
         }
 
         // --- 6. Controls wiring ---
+        // UI event listeners
         document.getElementById('progression-select').addEventListener('change', (e) => {
             state.progressionName = e.target.value;
             savePrefs();
@@ -611,15 +634,43 @@
             savePrefs();
         });
 
-        // Timing controls
+        // Metronome control wiring
+        function updateBeatBar(beatIndex) {
+            const dots = document.querySelectorAll('#beat-bar .beat-dot');
+            dots.forEach((d, i) => d.style.background = i === beatIndex ? '#4a90e2' : '#ddd');
+            const hint = document.getElementById('beat-hint');
+            if (hint) {
+                if (beatIndex >= 0) {
+                    hint.innerText = `Beat ${beatIndex + 1}/${CONFIG.timing.beatCount} — play on beat 1 (blue accented)`;
+                } else {
+                    hint.innerText = 'Play on the blue dot (downbeat accented).';
+                }
+            }
+        }
+
+        // Subscribe to metronome beat events
+        metronome.on('beat', (data) => {
+            updateBeatBar(data.beatIndex);
+        });
+
+        // BPM slider
         document.getElementById('bpm-slider').addEventListener('input', (e) => {
             const bpm = parseInt(e.target.value, 10);
             document.getElementById('bpm-value').innerText = String(bpm);
-            setBpm(bpm);
+            metronome.setBpm(bpm);
+            CONFIG.timing.bpm = bpm; // sync config
             savePrefs();
         });
+
+        // Metronome button
         document.getElementById('btn-metro').addEventListener('click', () => {
-            if (metroRunning) { stopMetronome(); } else { startMetronome(); }
+            if (metronome.isRunning()) {
+                metronome.stop();
+                document.getElementById('btn-metro').innerText = 'Metronome: Off';
+            } else {
+                metronome.start();
+                document.getElementById('btn-metro').innerText = 'Metronome: On';
+            }
             savePrefs();
         });
 
@@ -630,7 +681,7 @@
                 key: state.key,
                 randomStart: document.getElementById('random-start').checked,
                 bpm: CONFIG.timing.bpm,
-                metroOn: metroRunning
+                metroOn: metronome.isRunning()
             };
             try { localStorage.setItem('pianoTutorPrefs', JSON.stringify(prefs)); } catch {}
         }
@@ -662,7 +713,7 @@
                 const val = document.getElementById('bpm-value');
                 if (slider) slider.value = prefs.bpm;
                 if (val) val.innerText = String(prefs.bpm);
-                setBpm(prefs.bpm);
+                metronome.setBpm(prefs.bpm);
             }
             if (prefs.metroOn) {
                 // Start after a user gesture: we flip button label only; actual start requires click in some browsers
