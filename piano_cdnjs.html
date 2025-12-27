@@ -29,7 +29,7 @@
         
         try {
             const { Factory } = Vex.Flow;
-            vf = new Factory({ renderer: { elementId: 'canvas-container', width: 500, height: 360 } });
+            vf = new Factory({ renderer: { elementId: 'canvas-container', width: 500, height: 320 } });
             
             // Draw empty staff with a whole rest placeholder
             drawStaff({ targetNoteNames: [], playedNoteNames: [], playedColor: '#888' });
@@ -90,7 +90,7 @@
             const playedSplit = splitByClef(playedList);
 
             const staveTreble = new Vex.Flow.Stave(10, 40, 480);
-            const staveBass = new Vex.Flow.Stave(10, 180, 480);
+            const staveBass = new Vex.Flow.Stave(10, 135, 480);
             staveTreble.addClef('treble').addTimeSignature('4/4');
             staveBass.addClef('bass').addTimeSignature('4/4');
 
@@ -118,8 +118,8 @@
             bassVoice.addTickable(bassTargetNote);
             bassUserVoice.addTickable(bassPlayedNote);
 
-            new Vex.Flow.Formatter().joinVoices([trebleVoice, trebleUserVoice]).format([trebleVoice, trebleUserVoice], 420);
-            new Vex.Flow.Formatter().joinVoices([bassVoice, bassUserVoice]).format([bassVoice, bassUserVoice], 420);
+            new Vex.Flow.Formatter().joinVoices([trebleVoice, trebleUserVoice]).format([trebleVoice, trebleUserVoice], 400);
+            new Vex.Flow.Formatter().joinVoices([bassVoice, bassUserVoice]).format([bassVoice, bassUserVoice], 400);
 
             staveTreble.setContext(vf.context).draw();
             staveBass.setContext(vf.context).draw();
@@ -129,6 +129,17 @@
             trebleUserVoice.draw(vf.context, staveTreble);
             bassVoice.draw(vf.context, staveBass);
             bassUserVoice.draw(vf.context, staveBass);
+
+            // Draw a subtle middle-C guide line between staves
+            const midY = (staveTreble.getYForLine(5) + staveBass.getYForLine(-1)) / 2;
+            vf.context.save();
+            vf.context.setStrokeStyle('#ccc');
+            vf.context.setLineWidth(1);
+            vf.context.beginPath();
+            vf.context.moveTo(10, midY);
+            vf.context.lineTo(490, midY);
+            vf.context.stroke();
+            vf.context.restore();
         }
 
         function midiToNoteName(midiNote) {
