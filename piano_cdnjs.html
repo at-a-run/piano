@@ -30,7 +30,7 @@
             vf = new Factory({ renderer: { elementId: 'canvas-container', width: 500, height: 250 } });
             
             // Draw empty staff with a whole rest placeholder
-            drawStaff("B4", false, true); 
+            drawStaff([], true); 
         } catch (e) {
             document.getElementById("status-box").innerText = "Error: VexFlow failed to load from CDN.";
             document.getElementById("status-box").style.background = "#f8d7da";
@@ -45,13 +45,14 @@
             return `${letter.toLowerCase()}${sharp ? '#': ''}/${octave}`;
         }
 
-        function drawStaff(noteKeys, isRest = false) {
+        function drawStaff(noteKeys = [], isRest = false) {
             if (!vf) return;
 
             // Reset context to avoid accumulating draw state
             vf.context.clear();
 
-            const vexKeys = isRest ? ["b/4"] : noteKeys.map(toVexKey);
+            const normalized = Array.isArray(noteKeys) ? noteKeys : [noteKeys];
+            const vexKeys = isRest ? ["b/4"] : normalized.map(toVexKey);
             const duration = isRest ? 'wr' : 'w';
 
             const stave = new Vex.Flow.Stave(10, 40, 480);
