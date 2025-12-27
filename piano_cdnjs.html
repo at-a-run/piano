@@ -24,15 +24,31 @@
     <div class="note-text" id="note-name">You: (rest)</div>
 
     <script>
+        // --- 0. Config ---
+        const CONFIG = {
+            renderer: { width: 500, height: 320 },
+            layout: {
+                staveWidth: 480,
+                trebleY: 40,
+                bassY: 135,
+                formatterWidth: 400,
+                guideColor: '#ccc'
+            },
+            colors: {
+                played: { rest: '#888', ok: '#2d8f4a', err: '#c0392b' }
+            },
+            advanceDelayMs: 650
+        };
+
         // --- 1. VexFlow Setup ---
         let vf;
         
         try {
             const { Factory } = Vex.Flow;
-            vf = new Factory({ renderer: { elementId: 'canvas-container', width: 500, height: 320 } });
+            vf = new Factory({ renderer: { elementId: 'canvas-container', width: CONFIG.renderer.width, height: CONFIG.renderer.height } });
             
             // Draw empty staff with a whole rest placeholder
-            drawStaff({ targetNoteNames: [], playedNoteNames: [], playedColor: '#888' });
+            drawStaff({ targetNoteNames: [], playedNoteNames: [], playedColor: CONFIG.colors.played.rest });
         } catch (e) {
             document.getElementById("status-box").innerText = "Error: VexFlow failed to load from CDN.";
             document.getElementById("status-box").style.background = "#f8d7da";
@@ -64,38 +80,43 @@
         function buildNote(keys, duration, clef, color) {
             const stemDir = clef === 'bass' ? -1 : 1;
             const note = new Vex.Flow.StaveNote({ keys, duration, clef, stem_direction: stemDir });
-            if (color) {
-                note.setStyle({ fillStyle: color, strokeStyle: color });
-            }
+            if (color) note.setStyle({ fillStyle: color, strokeStyle: color });
             if (!duration.includes('r')) {
                 keys.forEach((k, idx) => {
-                    if (k.includes('#')) {
-                        note.addAccidental(idx, new Vex.Flow.Accidental('#'));
-                    }
+                    if (k.includes('#')) note.addAccidental(idx, new Vex.Flow.Accidental('#'));
                 });
             }
             return note;
         }
 
-        function drawStaff({ targetNoteNames = [], playedNoteNames = [], playedColor = '#c0392b' }) {
+        function buildStaves() {
+            const treble = new Vex.Flow.Stave(10, CONFIG.layout.trebleY, CONFIG.layout.staveWidth);
+            const bass = new Vex.Flow.Stave(10, CONFIG.layout.bassY, CONFIG.layout.staveWidth);
+            treble.addClef('treble').addTimeSignature('4/4');
+            bass.addClef('bass').addTimeSignature('4/4');
+            const connector = new Vex.Flow.StaveConnector(treble, bass);
+            connector.setType(Vex.Flow.StaveConnector.type.BRACE);
+            return { treble, bass, connector };
+        }
+
+        function normalizeVoices(targetNoteNames, playedNoteNames) {
+            const targetList = Array.isArray(targetNoteNames) ? targetNoteNames : [targetNoteNames];
+            const playedList = Array.isArray(playedNoteNames) ? playedNoteNames : [playedNoteNames];
+
+            return {
+                targetSplit: splitByClef(targetList),
+                playedSplit: splitByClef(playedList)
+            };
+        }
+
+        function drawStaff({ targetNoteNames = [], playedNoteNames = [], playedColor }) {
             if (!vf) return;
 
             // Reset context to avoid accumulating draw state
             vf.context.clear();
 
-            const targetList = Array.isArray(targetNoteNames) ? targetNoteNames : [targetNoteNames];
-            const playedList = Array.isArray(playedNoteNames) ? playedNoteNames : [playedNoteNames];
-
-            const targetSplit = splitByClef(targetList);
-            const playedSplit = splitByClef(playedList);
-
-            const staveTreble = new Vex.Flow.Stave(10, 40, 480);
-            const staveBass = new Vex.Flow.Stave(10, 135, 480);
-            staveTreble.addClef('treble').addTimeSignature('4/4');
-            staveBass.addClef('bass').addTimeSignature('4/4');
-
-            const connector = new Vex.Flow.StaveConnector(staveTreble, staveBass);
-            connector.setType(Vex.Flow.StaveConnector.type.BRACE);
+            const { targetSplit, playedSplit } = normalizeVoices(targetNoteNames, playedNoteNames);
+            const staves = buildStaves();
 
             const trebleTargetKeys = targetSplit.treble.length ? targetSplit.treble.map(toVexKey) : ['b/4'];
             const treblePlayedKeys = playedSplit.treble.length ? playedSplit.treble.map(toVexKey) : ['b/4'];
@@ -103,9 +124,9 @@
             const bassPlayedKeys = playedSplit.bass.length ? playedSplit.bass.map(toVexKey) : ['d/3'];
 
             const trebleTargetNote = buildNote(trebleTargetKeys, targetSplit.treble.length ? 'w' : 'wr', 'treble');
-            const treblePlayedNote = buildNote(treblePlayedKeys, playedSplit.treble.length ? 'w' : 'wr', 'treble', playedList.length ? playedColor : null);
+            const treblePlayedNote = buildNote(treblePlayedKeys, playedSplit.treble.length ? 'w' : 'wr', 'treble', playedSplit.treble.length ? playedColor : null);
             const bassTargetNote = buildNote(bassTargetKeys, targetSplit.bass.length ? 'w' : 'wr', 'bass');
-            const bassPlayedNote = buildNote(bassPlayedKeys, playedSplit.bass.length ? 'w' : 'wr', 'bass', playedList.length ? playedColor : null);
+            const bassPlayedNote = buildNote(bassPlayedKeys, playedSplit.bass.length ? 'w' : 'wr', 'bass', playedSplit.bass.length ? playedColor : null);
 
             const trebleVoice = new Vex.Flow.Voice({ num_beats: 4, beat_value: 4 });
             const trebleUserVoice = new Vex.Flow.Voice({ num_beats: 4, beat_value: 4 });
@@ -118,26 +139,26 @@
             bassVoice.addTickable(bassTargetNote);
             bassUserVoice.addTickable(bassPlayedNote);
 
-            new Vex.Flow.Formatter().joinVoices([trebleVoice, trebleUserVoice]).format([trebleVoice, trebleUserVoice], 400);
-            new Vex.Flow.Formatter().joinVoices([bassVoice, bassUserVoice]).format([bassVoice, bassUserVoice], 400);
+            new Vex.Flow.Formatter().joinVoices([trebleVoice, trebleUserVoice]).format([trebleVoice, trebleUserVoice], CONFIG.layout.formatterWidth);
+            new Vex.Flow.Formatter().joinVoices([bassVoice, bassUserVoice]).format([bassVoice, bassUserVoice], CONFIG.layout.formatterWidth);
 
-            staveTreble.setContext(vf.context).draw();
-            staveBass.setContext(vf.context).draw();
-            connector.setContext(vf.context).draw();
+            staves.treble.setContext(vf.context).draw();
+            staves.bass.setContext(vf.context).draw();
+            staves.connector.setContext(vf.context).draw();
 
-            trebleVoice.draw(vf.context, staveTreble);
-            trebleUserVoice.draw(vf.context, staveTreble);
-            bassVoice.draw(vf.context, staveBass);
-            bassUserVoice.draw(vf.context, staveBass);
+            trebleVoice.draw(vf.context, staves.treble);
+            trebleUserVoice.draw(vf.context, staves.treble);
+            bassVoice.draw(vf.context, staves.bass);
+            bassUserVoice.draw(vf.context, staves.bass);
 
             // Draw a subtle middle-C guide line between staves
-            const midY = (staveTreble.getYForLine(5) + staveBass.getYForLine(-1)) / 2;
+            const midY = (staves.treble.getYForLine(5) + staves.bass.getYForLine(-1)) / 2;
             vf.context.save();
-            vf.context.setStrokeStyle('#ccc');
+            vf.context.setStrokeStyle(CONFIG.layout.guideColor);
             vf.context.setLineWidth(1);
             vf.context.beginPath();
             vf.context.moveTo(10, midY);
-            vf.context.lineTo(490, midY);
+            vf.context.lineTo(10 + CONFIG.layout.staveWidth + 10, midY);
             vf.context.stroke();
             vf.context.restore();
         }
@@ -179,7 +200,7 @@
             const targetNames = targetSorted.map(midiToNoteName);
 
             const isCorrect = playedSorted.length > 0 && setsEqual(playedSorted, targetSorted);
-            const playedColor = playedSorted.length === 0 ? '#888' : (isCorrect ? '#2d8f4a' : '#c0392b');
+            const playedColor = playedSorted.length === 0 ? CONFIG.colors.played.rest : (isCorrect ? CONFIG.colors.played.ok : CONFIG.colors.played.err);
 
             document.getElementById("note-name").innerText = playedNames.length ? `You: ${playedNames.join(" · ")}` : "You: (rest)";
 
@@ -235,7 +256,7 @@
             state.advanceTimer = setTimeout(() => {
                 state.advanceTimer = null;
                 pickNextTarget();
-            }, 650);
+            }, CONFIG.advanceDelayMs);
         }
 
         // --- 5. MIDI Setup ---
