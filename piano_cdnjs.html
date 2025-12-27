@@ -23,41 +23,78 @@
 
     <script>
         // --- 1. VexFlow Setup ---
-        let vf, score, system;
+        let vf;
         
         try {
             const { Factory } = Vex.Flow;
             vf = new Factory({ renderer: { elementId: 'canvas-container', width: 500, height: 250 } });
-            score = vf.EasyScore();
-            system = vf.System();
             
-            // Draw empty staff
-            drawStaff("B/4/w/r", false); 
+            // Draw empty staff with a whole rest placeholder
+            drawStaff("B4", false, true); 
         } catch (e) {
             document.getElementById("status-box").innerText = "Error: VexFlow failed to load from CDN.";
             document.getElementById("status-box").style.background = "#f8d7da";
             console.error(e);
         }
 
-        function drawStaff(noteKey, isSharp) {
-            if (!vf) return;
-            vf.context.clear();
-            
-            const note = score.notes(`${noteKey}/w`, { stem: 'up' });
-            if (isSharp) note[0].addModifier(new Vex.Flow.Accidental("#"));
-            
-            system.addStave({ voices: [score.voice(note)] }).addClef('treble').addTimeSignature('4/4');
-            vf.draw();
+        function toVexKey(noteKey) {
+            // Convert like "C#4" -> "c#/4" for VexFlow
+            const match = noteKey.match(/^([A-Ga-g])(#?)(\d)$/);
+            if (!match) return "b/4"; // safe fallback
+            const [, letter, sharp, octave] = match;
+            return `${letter.toLowerCase()}${sharp ? '#': ''}/${octave}`;
         }
 
-        function drawNote(midiNote) {
+        function drawStaff(noteKeys, isRest = false) {
+            if (!vf) return;
+
+            // Reset context to avoid accumulating draw state
+            vf.context.clear();
+
+            const vexKeys = isRest ? ["b/4"] : noteKeys.map(toVexKey);
+            const duration = isRest ? 'wr' : 'w';
+
+            const stave = new Vex.Flow.Stave(10, 40, 480);
+            stave.addClef('treble').addTimeSignature('4/4');
+
+            const staveNote = new Vex.Flow.StaveNote({ keys: vexKeys, duration, clef: 'treble', stem_direction: 1 });
+            if (!isRest) {
+                vexKeys.forEach((k, idx) => {
+                    if (k.includes('#')) {
+                        staveNote.addModifier(new Vex.Flow.Accidental('#'), idx);
+                    }
+                });
+            }
+
+            const voice = new Vex.Flow.Voice({ num_beats: 4, beat_value: 4 });
+            voice.setStrict(false);
+            voice.addTickable(staveNote);
+
+            new Vex.Flow.Formatter().joinVoices([voice]).format([voice], 400);
+
+            stave.setContext(vf.context).draw();
+            voice.draw(vf.context, stave);
+        }
+
+        function midiToNoteName(midiNote) {
             const notes = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
             const octave = Math.floor(midiNote / 12) - 1;
             const noteName = notes[midiNote % 12];
-            const key = `${noteName}/${octave}`;
-            
-            document.getElementById("note-name").innerText = key;
-            drawStaff(key, noteName.includes("#"));
+            return `${noteName}${octave}`;
+        }
+
+        const activeNotes = new Set();
+
+        function renderActiveNotes() {
+            if (activeNotes.size === 0) {
+                document.getElementById("note-name").innerText = "(rest)";
+                drawStaff([], true);
+                return;
+            }
+
+            const noteNames = Array.from(activeNotes).sort((a, b) => a - b).map(midiToNoteName);
+            document.getElementById("note-name").innerText = noteNames.join(" · ");
+            drawStaff(noteNames, false);
         }
 
         // --- 2. MIDI Setup ---
@@ -100,7 +137,16 @@
 
             // Note On (144-159) with Velocity > 0
             if (command >= 144 && command <= 159 && velocity > 0) {
-                drawNote(note);
+                activeNotes.add(note);
+                renderActiveNotes();
+                return;
+            }
+
+            // Note Off (128-143) or Note On with velocity 0
+            const isNoteOff = (command >= 128 && command <= 143) || (command >= 144 && command <= 159 && velocity === 0);
+            if (isNoteOff) {
+                activeNotes.delete(note);
+                renderActiveNotes();
             }
         }
     </script>
