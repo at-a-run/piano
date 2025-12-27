@@ -38,6 +38,18 @@
             </select>
         </label>
         <label style="margin-left: 10px;">
+            Key
+            <select id="key-select">
+                <option value="C">C</option>
+                <option value="G">G</option>
+                <option value="D">D</option>
+                <option value="A">A</option>
+                <option value="E">E</option>
+                <option value="F">F</option>
+                <option value="Bb">Bb</option>
+            </select>
+        </label>
+        <label style="margin-left: 10px;">
             Random start
             <input type="checkbox" id="random-start" checked>
         </label>
@@ -96,11 +108,8 @@
         }
 
         // --- Theory helpers ---
-        const NOTE_TO_PC = { 'C':0, 'C#':1, 'D':2, 'D#':3, 'E':4, 'F':5, 'F#':6, 'G':7, 'G#':8, 'A':9, 'A#':10, 'B':11 };
-        const ROMAN_TO_PC_C_MAJOR = {
-            'I':0, 'ii':2, 'iii':4, 'IV':5, 'V':7, 'vi':9, 'vii':11,
-            'I7':0, 'IV7':5, 'V7':7
-        };
+        const NOTE_TO_PC = { 'C':0, 'C#':1, 'Db':1, 'D':2, 'D#':3, 'Eb':3, 'E':4, 'F':5, 'F#':6, 'Gb':6, 'G':7, 'G#':8, 'Ab':8, 'A':9, 'A#':10, 'Bb':10, 'B':11 };
+        const ROMAN_DEGREE_TO_PC_MAJOR = { 'I':0, 'ii':2, 'iii':4, 'IV':5, 'V':7, 'vi':9, 'vii':11 };
 
         function midiToNoteName(midiNote) {
             const notes = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
@@ -131,19 +140,22 @@
             return roman === roman.toUpperCase() ? 'major' : 'minor';
         }
 
-        // Build chord notes for C major; level controls whether to add bass root
-        function chordForRomanC(roman, level='easy') {
-            const pcRoot = ROMAN_TO_PC_C_MAJOR[roman];
-            if (pcRoot == null) return { midi: [], names: [] };
+        // Build chord notes for a given major key; level controls whether to add bass root
+        function chordForRoman(keyName, roman, level='easy') {
+            const keyPC = NOTE_TO_PC[keyName];
+            if (keyPC == null) return { midi: [], names: [] };
+            const base = roman.replace('7','');
+            const degreePC = ROMAN_DEGREE_TO_PC_MAJOR[base];
+            if (degreePC == null) return { midi: [], names: [] };
+            const chordRootPC = (keyPC + degreePC) % 12;
             const quality = romanQuality(roman);
             const triadPCs = quality === 'dom7' ? makeDominant7PCs() : makeTriadPCs(quality);
 
-            // Anchor treble around octave 4
-            const rootTrebleMidi = (4 + 1) * 12 + pcRoot; // ~C4+
+            // Anchor treble around octave 4, transposed to chord root
+            const rootTrebleMidi = (4 + 1) * 12 + chordRootPC;
             const trebleMidis = triadPCs.map(semi => rootTrebleMidi + semi);
-
             // Optionally add bass root around octave 3
-            const bassMidi = (3 + 1) * 12 + pcRoot; // ~C3+
+            const bassMidi = (3 + 1) * 12 + chordRootPC;
             const outMidis = level === 'intermediate' ? [bassMidi, ...trebleMidis] : trebleMidis;
             const outNames = outMidis.map(midiToNoteName);
             return { midi: outMidis, names: outNames };
@@ -256,7 +268,8 @@
             advanceTimer: null,
             progressionName: 'pop_1564',
             level: 'easy',
-            currentIndex: 0
+            currentIndex: 0,
+            key: 'C'
         };
 
         function setTargetMidiAndNames(midi, names) {
@@ -312,7 +325,7 @@
         function showCurrentStep() {
             const prog = getCurrentProgression();
             const roman = prog.steps[state.currentIndex];
-            const chord = chordForRomanC(roman, state.level);
+            const chord = chordForRoman(state.key, roman, state.level);
             setTargetMidiAndNames(chord.midi, chord.names);
         }
 
@@ -361,6 +374,7 @@
                 });
             }
             // Start with an initial target once MIDI is ready
+            loadPrefs();
             const randomStart = document.getElementById('random-start').checked;
             startProgression(randomStart);
         }
@@ -401,11 +415,13 @@
         // --- 6. Controls wiring ---
         document.getElementById('progression-select').addEventListener('change', (e) => {
             state.progressionName = e.target.value;
+            savePrefs();
             startProgression(document.getElementById('random-start').checked);
         });
 
         document.getElementById('level-select').addEventListener('change', (e) => {
             state.level = e.target.value;
+            savePrefs();
             showCurrentStep();
         });
 
@@ -416,6 +432,49 @@
         document.getElementById('btn-next').addEventListener('click', () => {
             nextStep();
         });
+
+        document.getElementById('key-select').addEventListener('change', (e) => {
+            state.key = e.target.value;
+            savePrefs();
+            showCurrentStep();
+        });
+
+        document.getElementById('random-start').addEventListener('change', () => {
+            savePrefs();
+        });
+
+        function savePrefs() {
+            const prefs = {
+                progression: state.progressionName,
+                level: state.level,
+                key: state.key,
+                randomStart: document.getElementById('random-start').checked
+            };
+            try { localStorage.setItem('pianoTutorPrefs', JSON.stringify(prefs)); } catch {}
+        }
+
+        function loadPrefs() {
+            let prefs = null;
+            try { prefs = JSON.parse(localStorage.getItem('pianoTutorPrefs') || 'null'); } catch {}
+            if (!prefs) return;
+            if (prefs.progression) {
+                state.progressionName = prefs.progression;
+                const sel = document.getElementById('progression-select');
+                if (sel) sel.value = prefs.progression;
+            }
+            if (prefs.level) {
+                state.level = prefs.level;
+                const sel = document.getElementById('level-select');
+                if (sel) sel.value = prefs.level;
+            }
+            if (prefs.key) {
+                state.key = prefs.key;
+                const sel = document.getElementById('key-select');
+                if (sel) sel.value = prefs.key;
+            }
+            const rs = document.getElementById('random-start');
+            if (rs && typeof prefs.randomStart === 'boolean') rs.checked = prefs.randomStart;
+        }
     </script>
 </body>
 </html>
