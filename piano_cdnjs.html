@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>MIDI Sheet Music (CDN)</title>
+    <script src="https://cdn.jsdelivr.net/npm/vexflow@4.2.2/releases/vexflow-min.js"></script>
+    <style>
+        body { font-family: sans-serif; text-align: center; padding: 20px; }
+        #status-box { 
+            padding: 10px; background: #eee; margin-bottom: 10px; font-weight: bold; border-radius: 5px;
+        }
+        .active { background-color: #dff0d8 !important; color: #3c763d; transition: background 0.1s; }
+        #canvas-container { display: inline-block; border: 1px solid #ddd; padding: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+        .note-text { font-size: 24px; font-weight: bold; color: #555; margin-top: 10px; min-height: 30px;}
+    </style>
+</head>
+<body>
+
+    <h1>MIDI Sheet Music (Secure CDN)</h1>
+    <div id="status-box">Waiting for input...</div>
+    
+    <div id="canvas-container"></div>
+    <div class="note-text" id="note-name">Play a key</div>
+
+    <script>
+        // --- 1. VexFlow Setup ---
+        let vf, score, system;
+        
+        try {
+            const { Factory } = Vex.Flow;
+            vf = new Factory({ renderer: { elementId: 'canvas-container', width: 500, height: 250 } });
+            score = vf.EasyScore();
+            system = vf.System();
+            
+            // Draw empty staff
+            drawStaff("B/4/w/r", false); 
+        } catch (e) {
+            document.getElementById("status-box").innerText = "Error: VexFlow failed to load from CDN.";
+            document.getElementById("status-box").style.background = "#f8d7da";
+            console.error(e);
+        }
+
+        function drawStaff(noteKey, isSharp) {
+            if (!vf) return;
+            vf.context.clear();
+            
+            const note = score.notes(`${noteKey}/w`, { stem: 'up' });
+            if (isSharp) note[0].addModifier(new Vex.Flow.Accidental("#"));
+            
+            system.addStave({ voices: [score.voice(note)] }).addClef('treble').addTimeSignature('4/4');
+            vf.draw();
+        }
+
+        function drawNote(midiNote) {
+            const notes = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+            const octave = Math.floor(midiNote / 12) - 1;
+            const noteName = notes[midiNote % 12];
+            const key = `${noteName}/${octave}`;
+            
+            document.getElementById("note-name").innerText = key;
+            drawStaff(key, noteName.includes("#"));
+        }
+
+        // --- 2. MIDI Setup ---
+        if (navigator.requestMIDIAccess) {
+            navigator.requestMIDIAccess().then(onSuccess, onFailure);
+        } else {
+            document.getElementById("status-box").innerText = "Web MIDI not supported in this browser.";
+        }
+
+        function onSuccess(midiAccess) {
+            const inputs = midiAccess.inputs;
+            if (inputs.size === 0) {
+                document.getElementById("status-box").innerText = "No MIDI devices found.";
+            } else {
+                // Connect to all inputs
+                inputs.forEach(input => {
+                    document.getElementById("status-box").innerText = `Connected to: ${input.name}`;
+                    input.onmidimessage = handleMIDI;
+                });
+            }
+        }
+
+        function onFailure() {
+            document.getElementById("status-box").innerText = "Could not access MIDI.";
+        }
+
+        function handleMIDI(message) {
+            const command = message.data[0];
+            
+            // Ignore Active Sensing (254) and Clock (248)
+            if (command === 254 || command === 248) return;
+
+            const note = message.data[1];
+            const velocity = message.data.length > 2 ? message.data[2] : 0;
+
+            // Visual Flash
+            const box = document.getElementById("status-box");
+            box.classList.add("active");
+            setTimeout(() => box.classList.remove("active"), 150);
+
+            // Note On (144-159) with Velocity > 0
+            if (command >= 144 && command <= 159 && velocity > 0) {
+                drawNote(note);
+            }
+        }
+    </script>
+</body>
+</html>
