@@ -29,7 +29,7 @@
         
         try {
             const { Factory } = Vex.Flow;
-            vf = new Factory({ renderer: { elementId: 'canvas-container', width: 500, height: 250 } });
+            vf = new Factory({ renderer: { elementId: 'canvas-container', width: 500, height: 360 } });
             
             // Draw empty staff with a whole rest placeholder
             drawStaff({ targetNoteNames: [], playedNoteNames: [], playedColor: '#888' });
@@ -47,6 +47,36 @@
             return `${letter.toLowerCase()}${sharp ? '#': ''}/${octave}`;
         }
 
+        function splitByClef(noteNames = []) {
+            const treble = [];
+            const bass = [];
+            noteNames.forEach(n => {
+                const octave = parseInt(n.match(/(\d+)$/)?.[1] || '4', 10);
+                if (octave <= 3) {
+                    bass.push(n);
+                } else {
+                    treble.push(n);
+                }
+            });
+            return { treble, bass };
+        }
+
+        function buildNote(keys, duration, clef, color) {
+            const stemDir = clef === 'bass' ? -1 : 1;
+            const note = new Vex.Flow.StaveNote({ keys, duration, clef, stem_direction: stemDir });
+            if (color) {
+                note.setStyle({ fillStyle: color, strokeStyle: color });
+            }
+            if (!duration.includes('r')) {
+                keys.forEach((k, idx) => {
+                    if (k.includes('#')) {
+                        note.addAccidental(idx, new Vex.Flow.Accidental('#'));
+                    }
+                });
+            }
+            return note;
+        }
+
         function drawStaff({ targetNoteNames = [], playedNoteNames = [], playedColor = '#c0392b' }) {
             if (!vf) return;
 
@@ -56,44 +86,49 @@
             const targetList = Array.isArray(targetNoteNames) ? targetNoteNames : [targetNoteNames];
             const playedList = Array.isArray(playedNoteNames) ? playedNoteNames : [playedNoteNames];
 
-            const targetKeys = targetList.length ? targetList.map(toVexKey) : ["b/4"];
-            const playedKeys = playedList.length ? playedList.map(toVexKey) : ["b/4"];
+            const targetSplit = splitByClef(targetList);
+            const playedSplit = splitByClef(playedList);
 
-            const targetDuration = targetList.length ? 'w' : 'wr';
-            const playedDuration = playedList.length ? 'w' : 'wr';
+            const staveTreble = new Vex.Flow.Stave(10, 40, 480);
+            const staveBass = new Vex.Flow.Stave(10, 180, 480);
+            staveTreble.addClef('treble').addTimeSignature('4/4');
+            staveBass.addClef('bass').addTimeSignature('4/4');
 
-            const stave = new Vex.Flow.Stave(10, 40, 480);
-            stave.addClef('treble').addTimeSignature('4/4');
+            const connector = new Vex.Flow.StaveConnector(staveTreble, staveBass);
+            connector.setType(Vex.Flow.StaveConnector.type.BRACE);
 
-            const targetNote = new Vex.Flow.StaveNote({ keys: targetKeys, duration: targetDuration, clef: 'treble', stem_direction: 1 });
-            targetKeys.forEach((k, idx) => {
-                if (k.includes('#')) {
-                    targetNote.addAccidental(idx, new Vex.Flow.Accidental('#'));
-                }
-            });
+            const trebleTargetKeys = targetSplit.treble.length ? targetSplit.treble.map(toVexKey) : ['b/4'];
+            const treblePlayedKeys = playedSplit.treble.length ? playedSplit.treble.map(toVexKey) : ['b/4'];
+            const bassTargetKeys = targetSplit.bass.length ? targetSplit.bass.map(toVexKey) : ['d/3'];
+            const bassPlayedKeys = playedSplit.bass.length ? playedSplit.bass.map(toVexKey) : ['d/3'];
 
-            const playedNote = new Vex.Flow.StaveNote({ keys: playedKeys, duration: playedDuration, clef: 'treble', stem_direction: 1 });
-            if (playedList.length) {
-                playedNote.setStyle({ fillStyle: playedColor, strokeStyle: playedColor });
-                playedKeys.forEach((k, idx) => {
-                    if (k.includes('#')) {
-                        playedNote.addAccidental(idx, new Vex.Flow.Accidental('#'));
-                    }
-                });
-            }
+            const trebleTargetNote = buildNote(trebleTargetKeys, targetSplit.treble.length ? 'w' : 'wr', 'treble');
+            const treblePlayedNote = buildNote(treblePlayedKeys, playedSplit.treble.length ? 'w' : 'wr', 'treble', playedList.length ? playedColor : null);
+            const bassTargetNote = buildNote(bassTargetKeys, targetSplit.bass.length ? 'w' : 'wr', 'bass');
+            const bassPlayedNote = buildNote(bassPlayedKeys, playedSplit.bass.length ? 'w' : 'wr', 'bass', playedList.length ? playedColor : null);
 
-            const voice = new Vex.Flow.Voice({ num_beats: 4, beat_value: 4 });
-            const userVoice = new Vex.Flow.Voice({ num_beats: 4, beat_value: 4 });
-            voice.setStrict(false);
-            userVoice.setStrict(false);
-            voice.addTickable(targetNote);
-            userVoice.addTickable(playedNote);
+            const trebleVoice = new Vex.Flow.Voice({ num_beats: 4, beat_value: 4 });
+            const trebleUserVoice = new Vex.Flow.Voice({ num_beats: 4, beat_value: 4 });
+            const bassVoice = new Vex.Flow.Voice({ num_beats: 4, beat_value: 4 });
+            const bassUserVoice = new Vex.Flow.Voice({ num_beats: 4, beat_value: 4 });
+            [trebleVoice, trebleUserVoice, bassVoice, bassUserVoice].forEach(v => v.setStrict(false));
 
-            new Vex.Flow.Formatter().joinVoices([voice, userVoice]).format([voice, userVoice], 420);
+            trebleVoice.addTickable(trebleTargetNote);
+            trebleUserVoice.addTickable(treblePlayedNote);
+            bassVoice.addTickable(bassTargetNote);
+            bassUserVoice.addTickable(bassPlayedNote);
 
-            stave.setContext(vf.context).draw();
-            voice.draw(vf.context, stave);
-            userVoice.draw(vf.context, stave);
+            new Vex.Flow.Formatter().joinVoices([trebleVoice, trebleUserVoice]).format([trebleVoice, trebleUserVoice], 420);
+            new Vex.Flow.Formatter().joinVoices([bassVoice, bassUserVoice]).format([bassVoice, bassUserVoice], 420);
+
+            staveTreble.setContext(vf.context).draw();
+            staveBass.setContext(vf.context).draw();
+            connector.setContext(vf.context).draw();
+
+            trebleVoice.draw(vf.context, staveTreble);
+            trebleUserVoice.draw(vf.context, staveTreble);
+            bassVoice.draw(vf.context, staveBass);
+            bassUserVoice.draw(vf.context, staveBass);
         }
 
         function midiToNoteName(midiNote) {
